@@ -1,27 +1,18 @@
 # Goal recognition on simulated grid worlds
 
-Compares a UVFA-style MLP value regressor (baseline) with a LightGBM regressor (improved) for recognising the intended goal from the first half of a noisy grid-world trajectory.
+Question: can a gradient-boosted goal scorer with engineered per-candidate features match or beat a UVFA-style MLP value regressor at recognising the intended goal from a partial grid-world trajectory?
 
-## Method
-- 1500 seeded 12x12 grid worlds (25% obstacles), 4 candidate goals each, one noisy shortest-path trajectory per map.
-- 70/30 episode split (stratified by true goal, unseen maps in test), seed 42.
-- Goal prediction = argmin of predicted remaining steps over the 4 candidates at the end of the observed prefix.
-- Both models are tuned with 3-fold GroupKFold on the training set only, then refit for seeds 42–44; the test set is used once.
+Data: seeded 12x12 grid worlds with random obstacles, 4 candidate goals per map, and noisy shortest-path trajectories to the intended goal. Only the first 50% of each trajectory is observed. Episodes are split 70/30 (train/test) with unseen maps in the test set.
 
-## Changes in this version
-- The improved model adds cross-candidate features: each goal's distance, heading and progress is compared with the other candidate goals on the same map at the same time step.
-- The improved LightGBM uses 400 trees and reg_lambda=1.0.
-- The baseline, data generation, split and evaluation are unchanged.
+Baseline: scikit-learn `MLPRegressor` (standardised inputs) predicting remaining steps to each goal; goal = argmin predicted cost. Tuned with 3-fold GroupKFold on the training set only.
 
-## Run
-```
-pip install -r requirements.txt
-python analysis.py
-```
-Outputs `results.json` and `figures/accuracy_comparison.png`.
+Improved: LightGBM binary classifier that predicts whether each candidate is the intended goal, using engineered progress/heading features and cross-candidate relative features. Goal = candidate with the highest predicted probability. Tuned with the same 4-combination, 3-fold GroupKFold budget on the training set only (neg log-loss).
 
-## Caveat
-Simulated data only; results are not comparable to the GRUF paper.
+Metric: goal-recognition accuracy on the test episodes, averaged over fits with seeds 42–44. The test set is used once.
+
+Run: `pip install -r requirements.txt && python analysis.py` (CPU only, a few minutes). Outputs `results.json` and `figures/accuracy_comparison.png`.
+
+Caveats: simulated data only, so results are not comparable to the GRUF paper. The sample is modest.
 
 ## Reference
 

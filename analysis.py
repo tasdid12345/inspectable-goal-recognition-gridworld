@@ -1,15 +1,15 @@
 """Goal recognition on simulated grid worlds.
 Baseline: MLP value regressor (UVFA-style) predicting remaining steps to each goal.
-Improved: LightGBM regressor with engineered progress/heading features plus
-cross-candidate (relative) features, so each goal is scored against the other goals
-on the same map at the same time step. Both pick the goal with the lowest predicted
-cost-to-go at the end of the observed prefix."""
+Improved: LightGBM classifier trained to recognise the intended goal. Each (prefix, candidate goal)
+row gets engineered progress/heading features plus cross-candidate (relative) features, and the
+label is 1 only for the true goal. Goal = candidate with the highest predicted probability of being
+the intended goal at the end of the observed prefix. Both models use the same 4-combo CV budget."""
 import collections, json, os, sys, time
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from lightgbm import LGBMRegressor
+from lightgbm import LGBMClassifier
 from sklearn.model_selection import GridSearchCV, GroupKFold, train_test_split
 from sklearn.neural_network import MLPRegressor
 from sklearn.pipeline import make_pipeline
@@ -123,14 +123,14 @@ def build(eps, improved):
 
 def make_model(improved, seed):
     if improved:
-        return LGBMRegressor(n_estimators=400, subsample=0.8, subsample_freq=1,
-                             colsample_bytree=0.8, reg_lambda=1.0,
-                             random_state=seed, verbose=-1)
+        return LGBMClassifier(n_estimators=400, subsample=0.8, subsample_freq=1,
+                              colsample_bytree=0.8, reg_lambda=1.0,
+                              random_state=seed, verbose=-1)
     return make_pipeline(StandardScaler(), MLPRegressor(max_iter=500, early_stopping=True, random_state=seed))
 
 
 def evaluate(cost, true):
-    """cost: (n_ep, K) predicted remaining steps. Returns accuracy, top-2 accuracy, mean log-loss."""
+    """cost: (n_ep, K) lower is better. Returns accuracy, top-2 accuracy, mean log-loss."""
     n = len(true)
     acc = np.mean(cost.argmin(1) == true)
     top2 = np.mean((np.argsort(cost, 1)[:, :2] == true[:, None]).any(1))
@@ -146,23 +146,36 @@ def main():
     tr, te = train_test_split(eps, test_size=0.3, random_state=SEED,
                               stratify=[e["true"] for e in eps])
     true_te = np.array([e["true"] for e in te])
+    true_tr_ep = np.array([e["true"] for e in tr])
     res = {}
     for name, improved in [("baseline", False), ("improved", True)]:
         Xtr, ytr, gtr, _ = build(tr, improved)
         Xte, _, _, fte = build(te, improved)
         Xte = Xte[fte]                          # final observed prefix only: K rows per test episode
+        if improved:
+            # binary target: 1 if this row's candidate is the intended goal (training set only)
+            cand_idx = np.arange(len(gtr)) % K
+            yfit = (true_tr_ep[gtr] == cand_idx).astype(int)
+            scoring = "neg_log_loss"
+        else:
+            yfit = ytr
+            scoring = "neg_mean_absolute_error"
         log(f"{name}: {len(Xtr)} training rows; 3-fold GroupKFold tuning on training set only")
         grid = ({"num_leaves": [15, 31], "learning_rate": [0.05, 0.1]} if improved else
                 {"mlpregressor__alpha": [1e-4, 1e-2],
                  "mlpregressor__hidden_layer_sizes": [(64, 64), (128, 128)]})
-        gs = GridSearchCV(make_model(improved, SEED), grid, cv=GroupKFold(3),
-                          scoring="neg_mean_absolute_error")
-        gs.fit(Xtr, ytr, groups=gtr)
+        gs = GridSearchCV(make_model(improved, SEED), grid, cv=GroupKFold(3), scoring=scoring)
+        gs.fit(Xtr, yfit, groups=gtr)
         log(f"{name}: best CV params {gs.best_params_}")
         runs = []
         for s in SEEDS:                         # refit with best params; test set used once
-            m = make_model(improved, s).set_params(**gs.best_params_).fit(Xtr, ytr)
-            runs.append(evaluate(m.predict(Xte).reshape(-1, K), true_te))
+            m = make_model(improved, s).set_params(**gs.best_params_).fit(Xtr, yfit)
+            if improved:
+                p = m.predict_proba(Xte)[:, 1].reshape(-1, K)
+                cost = -np.log(p + 1e-12)       # lower cost = higher probability of being the goal
+            else:
+                cost = m.predict(Xte).reshape(-1, K)
+            runs.append(evaluate(cost, true_te))
         res[name] = np.array(runs)              # columns: acc, top2, logloss
         log(f"{name}: test accuracy per seed {res[name][:, 0].round(3).tolist()}")
 
@@ -189,7 +202,7 @@ def main():
 
     out = {
         "question": "Can a gradient-boosted goal scorer with per-observation contributions match or beat a UVFA-style MLP value regressor at recognising the intended goal from a partial grid-world trajectory?",
-        "method": "Seeded 12x12 grid worlds with random obstacles and 4 candidate goals; noisy shortest-path trajectories observed for the first 50%; split by episode (70/30) with unseen maps in test; goal = argmin predicted remaining steps.",
+        "method": "Seeded 12x12 grid worlds with random obstacles and 4 candidate goals; noisy shortest-path trajectories observed for the first 50%; split by episode (70/30) with unseen maps in test; goal = argmax predicted probability of being the intended goal (improved) or argmin predicted remaining steps (baseline).",
         "dataset": {
             "name": "Simulated 2D grid-world goal-recognition trajectories (generated in code)",
             "source_url": "https://numpy.org/doc/stable/reference/random/index.html",
@@ -199,11 +212,11 @@ def main():
         "metric_name": "goal-recognition accuracy (test episodes)",
         "higher_is_better": True,
         "baseline": "scikit-learn MLPRegressor (standardised inputs) as a UVFA-style value regressor predicting remaining steps from position, goal, recent motion and step index; tuned by 3-fold GroupKFold on training data.",
-        "improved": "LightGBM regressor on the same inputs plus engineered start position, Euclidean/Manhattan distance to goal, start-to-goal progress, distance ratio and heading-toward-goal cosine, plus cross-candidate relative features (distance excess/rank, heading and progress relative to the other goals on the same map); same 4-combo CV tuning budget.",
+        "improved": "LightGBM binary classifier (is this candidate the intended goal?) on the same inputs plus engineered start position, Euclidean/Manhattan distance to goal, start-to-goal progress, distance ratio and heading-toward-goal cosine, plus cross-candidate relative features; goal = highest predicted probability per map. Tuned with the same 4-combo 3-fold GroupKFold budget (neg log-loss) on training data only.",
         "metrics": met,
         "notes": ("Simulated data only; the paper's GRUF model and its numbers are not reproduced, so results are not comparable to the paper. "
-                  "n_rows counts episodes, not observation rows. Log-loss is the multiclass softmax (temperature 2, fixed, not tuned) negative log-probability of the true goal, averaged over test episodes. "
-                  "Tuning used seed 42 only; seeds 42-44 vary the final fit. Test set used once. Baseline and split are unchanged; only the improved model's features and LightGBM settings changed. Dataset is small, so the sample size is modest; no subsampling was needed."),
+                  "n_rows counts episodes, not observation rows. Log-loss is the multiclass softmax (temperature 2, fixed, not tuned) negative log-probability of the true goal, averaged over test episodes; for the improved model the cost is -log(predicted goal probability). "
+                  "Tuning used seed 42 only; seeds 42-44 vary the final fit. Test set used once. Baseline, split and tuning budget are unchanged; only the improved model's training target (goal-identification classification instead of remaining-step regression) and LightGBM model changed. Dataset is small, so the sample size is modest; no subsampling was needed."),
     }
     with open("results.json", "w", encoding="utf-8") as f:
         json.dump(out, f, indent=2)
