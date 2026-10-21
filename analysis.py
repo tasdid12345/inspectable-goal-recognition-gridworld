@@ -1,7 +1,9 @@
 """Goal recognition on simulated grid worlds.
 Baseline: MLP value regressor (UVFA-style) predicting remaining steps to each goal.
-Improved: LightGBM regressor with engineered progress/heading features.
-Both pick the goal with the lowest predicted cost-to-go at the end of the observed prefix."""
+Improved: LightGBM regressor with engineered progress/heading features plus
+cross-candidate (relative) features, so each goal is scored against the other goals
+on the same map at the same time step. Both pick the goal with the lowest predicted
+cost-to-go at the end of the observed prefix."""
 import collections, json, os, sys, time
 import numpy as np
 import matplotlib
@@ -18,6 +20,8 @@ N_EP, S, K = 1500, 12, 4                 # episodes, grid side length, candidate
 OBST, NOISE, MAX_STEPS = 0.25, 0.10, 60  # obstacle density, random-action probability, step cap
 OBS_FRAC, TAU = 0.5, 2.0                 # observed fraction of trajectory; softmax temperature for log-loss
 MOVES = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+# column indices inside row_feats() output (improved variant)
+DE_COL, COS_COL, RATIO_COL = 9, 14, 13
 rng = np.random.default_rng(SEED)
 t0 = time.time()
 
@@ -82,6 +86,25 @@ def row_feats(pos, start, goal, vel, t, improved):
     return base + [*s, de, np.abs(dg).sum(), dsg, dsg - de, de / (dsg + 1e-9), cos, *dg]
 
 
+def block_rows(ep, pos, vel, t, improved):
+    """K rows for one (episode, prefix end). Improved adds relative features: each goal's
+    distance / heading / progress compared with the other candidate goals on the same map."""
+    F = np.array([row_feats(pos, ep["start"], ep["goals"][k], vel, t, improved)
+                  for k in range(K)], float)
+    if not improved:
+        return F
+    de, cos, ratio = F[:, DE_COL], F[:, COS_COL], F[:, RATIO_COL]
+    rel = np.column_stack([
+        de - de.min(),                 # distance excess over the closest candidate
+        de - de.mean(),                # distance relative to the average candidate
+        np.argsort(np.argsort(de)),    # rank of distance among candidates (0 = closest)
+        cos - cos.max(),               # heading excess over the best-aligned candidate
+        cos - cos.mean(),
+        ratio - ratio.max(),           # progress excess over the best candidate
+    ])
+    return np.hstack([F, rel])
+
+
 def build(eps, improved):
     """Rows = (prefix end t, candidate goal k) per episode; target = true remaining steps to goal k."""
     X, y, grp, fin = [], [], [], []
@@ -91,18 +114,18 @@ def build(eps, improved):
         for t in range(1, n_obs):
             pos = path[t]
             vel = np.subtract(pos, path[max(0, t - 3)]) / min(3, t)
-            for k in range(K):
-                X.append(row_feats(pos, ep["start"], ep["goals"][k], vel, t, improved))
-                y.append(ep["D"][k][pos])
-                grp.append(i)
-                fin.append(t == n_obs - 1)
+            X.extend(block_rows(ep, pos, vel, t, improved))
+            y.extend([ep["D"][k][pos] for k in range(K)])
+            grp.extend([i] * K)
+            fin.extend([t == n_obs - 1] * K)
     return np.array(X), np.array(y), np.array(grp), np.array(fin)
 
 
 def make_model(improved, seed):
     if improved:
-        return LGBMRegressor(n_estimators=300, subsample=0.8, subsample_freq=1,
-                             colsample_bytree=0.8, random_state=seed, verbose=-1)
+        return LGBMRegressor(n_estimators=400, subsample=0.8, subsample_freq=1,
+                             colsample_bytree=0.8, reg_lambda=1.0,
+                             random_state=seed, verbose=-1)
     return make_pipeline(StandardScaler(), MLPRegressor(max_iter=500, early_stopping=True, random_state=seed))
 
 
@@ -176,11 +199,11 @@ def main():
         "metric_name": "goal-recognition accuracy (test episodes)",
         "higher_is_better": True,
         "baseline": "scikit-learn MLPRegressor (standardised inputs) as a UVFA-style value regressor predicting remaining steps from position, goal, recent motion and step index; tuned by 3-fold GroupKFold on training data.",
-        "improved": "LightGBM regressor on the same inputs plus engineered start position, Euclidean/Manhattan distance to goal, start-to-goal progress, distance ratio and heading-toward-goal cosine; same 4-combo CV tuning budget.",
+        "improved": "LightGBM regressor on the same inputs plus engineered start position, Euclidean/Manhattan distance to goal, start-to-goal progress, distance ratio and heading-toward-goal cosine, plus cross-candidate relative features (distance excess/rank, heading and progress relative to the other goals on the same map); same 4-combo CV tuning budget.",
         "metrics": met,
         "notes": ("Simulated data only; the paper's GRUF model and its numbers are not reproduced, so results are not comparable to the paper. "
                   "n_rows counts episodes, not observation rows. Log-loss is the multiclass softmax (temperature 2, fixed, not tuned) negative log-probability of the true goal, averaged over test episodes. "
-                  "Tuning used seed 42 only; seeds 42-44 vary the final fit. Test set used once. Dataset is small, so the sample size is modest; no subsampling was needed."),
+                  "Tuning used seed 42 only; seeds 42-44 vary the final fit. Test set used once. Baseline and split are unchanged; only the improved model's features and LightGBM settings changed. Dataset is small, so the sample size is modest; no subsampling was needed."),
     }
     with open("results.json", "w", encoding="utf-8") as f:
         json.dump(out, f, indent=2)

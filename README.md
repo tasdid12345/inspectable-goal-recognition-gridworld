@@ -1,21 +1,27 @@
-# Goal recognition on grid worlds: MLP value regressor vs. LightGBM
+# Goal recognition on simulated grid worlds
 
-Online goal recognition has to infer which goal an agent is heading for from a partial trajectory, and recent work such as "Online Goal Recognition: When Inference-Time Computation is Not The (Full) Answer" (2026) proposes goal-agnostic recognisers built on universal value function approximators. This experiment asks whether a simpler, gradient-boosted scorer with engineered progress features can match a UVFA-style MLP at the same task, using a controlled simulated setting.
+Compares a UVFA-style MLP value regressor (baseline) with a LightGBM regressor (improved) for recognising the intended goal from the first half of a noisy grid-world trajectory.
 
-**Question:** Can a gradient-boosted goal scorer with per-observation contributions match or beat a UVFA-style MLP value regressor at recognising the intended goal from a partial grid-world trajectory?
+## Method
+- 1500 seeded 12x12 grid worlds (25% obstacles), 4 candidate goals each, one noisy shortest-path trajectory per map.
+- 70/30 episode split (stratified by true goal, unseen maps in test), seed 42.
+- Goal prediction = argmin of predicted remaining steps over the 4 candidates at the end of the observed prefix.
+- Both models are tuned with 3-fold GroupKFold on the training set only, then refit for seeds 42–44; the test set is used once.
 
-**Dataset:** Simulated 2D grid-world trajectories generated in code with numpy (no download). Each episode has its own random obstacle map, four candidate goals and one noisy shortest-path trajectory, of which the first 50% is observed. This is not the paper's own dataset.
+## Changes in this version
+- The improved model adds cross-candidate features: each goal's distance, heading and progress is compared with the other candidate goals on the same map at the same time step.
+- The improved LightGBM uses 400 trees and reg_lambda=1.0.
+- The baseline, data generation, split and evaluation are unchanged.
 
-**Baseline vs. improved:** The baseline is a scikit-learn MLP regressor that predicts remaining steps to each goal from observed position, goal, recent motion and step index. The improved model is a LightGBM regressor on the same inputs plus engineered progress and heading-toward-goal features. Both are tuned with 3-fold grouped cross-validation on the training episodes only, and the goal with the lowest predicted cost is chosen.
-
-## How to run
-
+## Run
 ```
 pip install -r requirements.txt
 python analysis.py
 ```
+Outputs `results.json` and `figures/accuracy_comparison.png`.
 
-Results: written to `results.json` (accuracy chart saved to `figures/`).
+## Caveat
+Simulated data only; results are not comparable to the GRUF paper.
 
 ## Reference
 
