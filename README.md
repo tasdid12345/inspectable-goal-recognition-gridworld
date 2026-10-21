@@ -14,6 +14,26 @@ Run: `pip install -r requirements.txt && python analysis.py` (CPU only, a few mi
 
 Caveats: simulated data only, so results are not comparable to the GRUF paper. The sample is modest.
 
+## Results (latest run)
+
+On simulated 12x12 grid-world goal-recognition trajectories, the same 450 held-out test episodes gave 54% accuracy for my LightGBM goal scorer versus 41% for a standard MLP goal-conditioned value regressor, a gain of about 12.5 percentage points.
+
+| Metric | Value |
+|---|---|
+| baseline_score | 0.4104 |
+| baseline_score_std | 0.003777 |
+| improved_score | 0.5356 |
+| improved_score_std | 0.005443 |
+| baseline_top2_accuracy | 0.7096 |
+| improved_top2_accuracy | 0.7889 |
+| baseline_logloss | 1.555 |
+| improved_logloss | 1.119 |
+| improvement | 0.1252 |
+
+Run on 2026-10-21. Full output: [results.json](results.json) · [run.log](run.log)
+
+Notes: Simulated data only; the paper's GRUF model and its numbers are not reproduced, so results are not comparable to the paper. n_rows counts episodes, not observation rows. Log-loss is the multiclass softmax (temperature 2, fixed, not tuned) negative log-probability of the true goal, averaged over test episodes; for the improved model the cost is -log(predicted goal probability). Tuning used seed 42 only; seeds 42-44 vary the final fit. Test set used once. Baseline, split and tuning budget are unchanged; only the improved model's training target (goal-identification classification instead of remaining-step regression) and LightGBM model changed. Dataset is small, so the sample size is modest; no subsampling was needed.
+
 ## Reference
 
 This project is motivated by the following paper:
